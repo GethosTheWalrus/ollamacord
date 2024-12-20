@@ -3,3 +3,4 @@ services:
     build: .
     environment:
       DISCORD_TOKEN: your_token_here
+      OLLAMA_URL: your_ollama_url_here
