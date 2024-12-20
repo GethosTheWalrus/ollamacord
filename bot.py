@@ -2,6 +2,7 @@ import discord
 import queue
 import asyncio
 import ollama
+import datetime
 import os
 from collections import deque  # Import deque
 
@@ -29,7 +30,7 @@ async def on_message(message):
     if message.content.startswith("!chat"):
         messageContent = message.content.split(" ")
         query = (
-            " ".join(messageContent[1:]) 
+            " ".join(messageContent[1:])
             if messageContent[0] == "!chat"
             else ""
         )
@@ -37,7 +38,7 @@ async def on_message(message):
             return
         else:
             query_queue.put({"query": query, "message": message})
-            history.append(query)  # Add query to history
+            update_conversation_history("user", query)
             await message.add_reaction("🤔")
 
 
@@ -74,7 +75,7 @@ async def process_query():
         # update the chat history
         await message.remove_reaction("🤔", reply.author)
         await message.add_reaction("✅")
-        history.append(response)
+        update_conversation_history("bot", response)
     except Exception as e:
         await message.add_reaction("❌")
         await message.reply(
@@ -101,6 +102,16 @@ def ask_ollama(query):
     for chunk in stream:
         final_content += chunk["message"]["content"]
         yield chunk["message"]["content"]
+
+
+def update_conversation_history(
+    role, content
+):
+    history.append({
+        "role": role,
+        "content": content,
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()
+    })
 
 
 async def background_task():
