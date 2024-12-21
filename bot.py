@@ -51,10 +51,10 @@ async def process_query():
     query = queue_object["query"]
     message = queue_object["message"]
 
-    if len(query) > 999:
+    if len(query) > 2000:
         await message.add_reaction("📏")
         await message.reply(
-            "I can only respond to prompts below 1000 characters in length"
+            "I can only respond to prompts with no more than than 2000"
         )
         return
 
@@ -77,6 +77,7 @@ async def process_query():
         await message.add_reaction("✅")
         update_conversation_history("bot", response)
     except Exception as e:
+        await message.remove_reaction("🤔", reply.author)
         await message.add_reaction("❌")
         await message.reply(
             f"I encountered an error while responding to you: "
