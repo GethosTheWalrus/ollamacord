@@ -92,7 +92,8 @@ def ask_ollama(query):
                 "role": "user",
                 "content": f"""Refer to this converation history,
                                but do not directly mention it: {history}
-                               Respond to this prompt: {query}.""",
+                               Respond to this prompt in fewer than
+                               1500 characters: {query}.""",
             },
         ],
         stream=True
