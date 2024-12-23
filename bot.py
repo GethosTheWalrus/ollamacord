@@ -12,8 +12,9 @@ ollama_client = ollama.Client(
     host=os.getenv("OLLAMA_URL", "http://ollama.home:11434"),
 )
 
+server_id = None
 query_queue = queue.Queue()
-history = deque(maxlen=20)  # Create a deque with a maximum length of 50
+history = {}
 
 
 @client.event
@@ -24,8 +25,12 @@ async def on_ready():
 
 @client.event
 async def on_message(message):
+    global server_id
+
     if message.author == client.user:
         return
+
+    server_id = message.guild.id # noqa
 
     if message.content.startswith("!chat"):
         messageContent = message.content.split(" ")
@@ -38,7 +43,7 @@ async def on_message(message):
             return
         else:
             query_queue.put({"query": query, "message": message})
-            update_conversation_history("user", query)
+            update_conversation_history("user", query, message.author.name)
             await message.add_reaction("🤔")
 
 
@@ -46,10 +51,15 @@ async def process_query():
     if query_queue.empty():
         return
 
-    print("Processing query...")
     queue_object = query_queue.get()
     query = queue_object["query"]
     message = queue_object["message"]
+
+    print(
+        f"Processing message with id {message.id} "
+        f"from user {message.author.name}",
+        flush=True
+    )
 
     if len(query) > 2000:
         await message.add_reaction("📏")
@@ -75,7 +85,7 @@ async def process_query():
         # update the chat history
         await message.remove_reaction("🤔", reply.author)
         await message.add_reaction("✅")
-        update_conversation_history("bot", response)
+        update_conversation_history("bot", response, "Ollama")
     except Exception as e:
         await message.remove_reaction("🤔", reply.author)
         await message.add_reaction("❌")
@@ -107,11 +117,23 @@ def ask_ollama(query):
 
 
 def update_conversation_history(
-    role, content
+    role, content, source
 ):
-    history.append({
+    global server_id
+    global history
+
+    if server_id is None:
+        return
+
+    if server_id not in history:
+        history[server_id] = deque(
+            maxlen=int(os.getenv("MEMORY_MAX_LENGTH", 20))
+        )
+
+    history[server_id].append({
         "role": role,
         "content": content,
+        "source": source,
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()
     })
 
