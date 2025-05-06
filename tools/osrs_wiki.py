@@ -90,14 +90,15 @@ async def extract_search_term(query: str, ollama_client) -> tuple[str, list[str]
     Return ONLY the search term, nothing else.
     
     Examples:
-    Query: "What are the stats for the Abyssal whip?"
-    Search term: "Abyssal whip"
+    Query: "How do I get the Rogue outfit?"
+    Search term: "Rogue outfit"
     
-    Query: "How do I complete Dragon Slayer quest?"
-    Search term: "Dragon Slayer"
+    Query: "What is the best way to train Agility?"
+    Search term: "Agility training"
     
     Query: "Where can I find the Abyssal demon?"
     Search term: "Abyssal demon"
+    
     """
     
     try:
