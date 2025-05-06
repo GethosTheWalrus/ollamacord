@@ -96,11 +96,11 @@ async def on_message(message):
 
     server_id = message.guild.id # noqa
 
-    if message.content.startswith("!test"):
+    if message.content.startswith("!ai"):
         messageContent = message.content.split(" ")
         query = (
             " ".join(messageContent[1:])
-            if messageContent[0] == "!test"
+            if messageContent[0] == "!ai"
             else ""
         )
         if len(query) == 0:
