@@ -1,7 +1,6 @@
 import discord
 import queue
 import asyncio
-import ollama
 import datetime
 import os
 import json
@@ -12,6 +11,7 @@ import socket
 import aiohttp
 from collections import deque  # Import deque
 from tools import TOOLS  # Import tools from the new module
+from tools.ollama_client import ollama_client  # Import the singleton client
 
 # Configure logging
 logging.basicConfig(
@@ -55,14 +55,9 @@ intents.messages = True  # Enable message events
 intents.guilds = True  # Enable guild events
 
 client = discord.Client(intents=intents)
-ollama_host = os.getenv("OLLAMA_URL", "http://localhost:11434")
-logger.info(f"Connecting to Ollama at: {ollama_host}")
-ollama_client = ollama.Client(host=ollama_host)
-
 server_id = None
 query_queue = queue.Queue()
 history = {}
-
 
 @client.event
 async def on_ready():
@@ -70,22 +65,18 @@ async def on_ready():
     logger.info("Bot is ready to receive messages")
     client.loop.create_task(background_task())  # Start the background task
 
-
 @client.event
 async def on_connect():
     logger.info("Bot connected to Discord")
     await test_network()  # Test network when connected
 
-
 @client.event
 async def on_disconnect():
     logger.warning("Bot disconnected from Discord")
 
-
 @client.event
 async def on_error(event, *args, **kwargs):
     logger.error(f"Discord error in {event}: {args} {kwargs}")
-
 
 @client.event
 async def on_message(message):
@@ -112,12 +103,15 @@ async def on_message(message):
     else:
         return
 
-
 async def determine_tools(query: str) -> list:
     """
     Use the LLM to determine which tools should be used for a given query.
     Returns a list of tool names that are relevant for the query.
     """
+    if not ollama_client.is_available():
+        logger.error("Ollama client is not available, falling back to regex matching")
+        return None
+        
     # Create a description of available tools
     tools_description = "\n".join([
         f"- {name}: {info['description']}"
@@ -145,16 +139,14 @@ Tools: osrs_wiki
 """
     
     try:
-        response = ""
-        for chunk in ollama_client.chat(
-            model="llama3.2:16384",
+        response = ollama_client.chat(
             messages=[{"role": "user", "content": prompt}],
-            stream=True
-        ):
-            response += chunk["message"]["content"]
+            stream=False,
+            options={"timeout": 10}  # 10 second timeout
+        )
         
         # Clean up the response
-        tools = response.strip().lower()
+        tools = response["message"]["content"].strip().lower()
         if tools == "none":
             logger.info("LLM determined no tools are needed")
             return []
@@ -167,7 +159,6 @@ Tools: osrs_wiki
         logger.error(f"Error determining tools: {str(e)}")
         # Fallback to the original regex method
         return None
-
 
 async def process_query():
     if query_queue.empty():
@@ -214,9 +205,13 @@ async def process_query():
                 try:
                     # Get search term from the LLM using the tool's extract_search_term function
                     if "extract_search_term" in tool_info:
-                        search_term, urls = await tool_info["extract_search_term"](query, ollama_client)
+                        search_term, urls = await tool_info["extract_search_term"](query)
                         if urls:
                             all_references.update(urls)
+                            # If it's the OSRS wiki tool, add a message about searching
+                            if tool_name == "osrs_wiki":
+                                # Update the reply to include the search message
+                                await reply.edit(content=f"*Thinking...*\n*Searching the OSRS wiki for {search_term}...*")
                     else:
                         search_term = None
                     
@@ -309,10 +304,9 @@ async def process_query():
 
         # update the chat history and reactions
         await message.remove_reaction("🤔", client.user)
-        if not active_tools:  # If no tools were used successfully
-            await message.add_reaction("💭")  # Thought bubble for pure LLM response
-        else:
-            await message.add_reaction("✅")  # Checkmark for successful completion
+        await message.add_reaction("✅")
+        if active_tools:
+            await message.add_reaction("🔨")
         update_conversation_history("bot", response, "Ollama")
     except Exception as e:
         logger.error(f"Error in process_query: {str(e)}")
@@ -326,8 +320,12 @@ async def process_query():
             f"```{e}```"
         )
 
-
 def ask_ollama(query, tool_context=""):
+    if not ollama_client.is_available():
+        logger.error("Ollama client is not available")
+        yield "Sorry, I'm having trouble processing your request right now. Please try again later."
+        return
+        
     messages = [
         {
             "role": "system",
@@ -352,17 +350,18 @@ def ask_ollama(query, tool_context=""):
                        2000 characters: {query}."""
     })
 
-    stream = ollama_client.chat(
-        model="llama3.2:16384",
-        messages=messages,
-        stream=True
-    )
-
-    final_content = ""
-    for chunk in stream:
-        final_content += chunk["message"]["content"]
-        yield chunk["message"]["content"]
-
+    try:
+        response = ollama_client.chat(
+            messages=messages,
+            stream=True,
+            options={"timeout": 30}  # 30 second timeout
+        )
+        
+        for chunk in response:
+            yield chunk["message"]["content"]
+    except Exception as e:
+        logger.error(f"Error in ask_ollama: {str(e)}")
+        yield "Sorry, I encountered an error while processing your request. Please try again later."
 
 def update_conversation_history(
     role, content, source
@@ -378,19 +377,112 @@ def update_conversation_history(
             maxlen=int(os.getenv("MEMORY_MAX_LENGTH", 20))
         )
 
-    history[server_id].append({
-        "role": role,
-        "content": content,
-        "source": source,
-        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()
-    })
+    # If MEMORY_MAX_LENGTH is 0, only keep a summary
+    if history[server_id].maxlen == 0:
+        try:
+            if not ollama_client.is_available():
+                raise ValueError("Ollama client is not available")
+                
+            # If we already have a summary, update it
+            if len(history[server_id]) > 0 and history[server_id][-1]["source"] == "summary":
+                current_summary = history[server_id][-1]["content"]
+                summary_prompt = f"""Update this conversation summary to include the new message. Keep the total summary under 150 words:
 
+Current summary: {current_summary}
+
+New message to add: {json.dumps({"role": role, "content": content, "source": source}, indent=2)}
+
+Updated summary:"""
+            else:
+                # Create new summary
+                summary_prompt = f"""Create a 150-word summary of this message:
+
+{json.dumps({"role": role, "content": content, "source": source}, indent=2)}
+
+Summary:"""
+            
+            response = ollama_client.chat(
+                model=ollama_client.summary_model,
+                messages=[{"role": "user", "content": summary_prompt}],
+                stream=False,
+                options={"timeout": 30}
+            )
+            
+            # Clear any existing messages and add only the summary
+            history[server_id].clear()
+            history[server_id].append({
+                "role": "system",
+                "content": f"Conversation summary: {response['message']['content'].strip()}",
+                "source": "summary",
+                "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()
+            })
+            
+        except Exception as e:
+            logger.error(f"Error updating conversation summary: {str(e)}")
+            # If summary fails, don't add anything to history
+            return
+    else:
+        # If we're at max length, the oldest message will roll off
+        if len(history[server_id]) >= history[server_id].maxlen:
+            # Get the message that's about to roll off
+            rolled_message = history[server_id][0]
+            
+            # Create or update the summary
+            if len(history[server_id]) > 0 and history[server_id][-1]["source"] == "summary":
+                # Update existing summary
+                current_summary = history[server_id][-1]["content"]
+                summary_prompt = f"""Update this conversation summary to include the rolled-off message. Keep the total summary under 150 words:
+
+Current summary: {current_summary}
+
+New message to add: {json.dumps(rolled_message, indent=2)}
+
+Updated summary:"""
+            else:
+                # Create new summary
+                summary_prompt = f"""Create a 150-word summary of this message:
+
+{json.dumps(rolled_message, indent=2)}
+
+Summary:"""
+            
+            try:
+                if not ollama_client.is_available():
+                    raise ValueError("Ollama client is not available")
+                    
+                response = ollama_client.chat(
+                    model=ollama_client.summary_model,
+                    messages=[{"role": "user", "content": summary_prompt}],
+                    stream=False,
+                    options={"timeout": 30}
+                )
+                
+                # Remove the oldest message and add the updated summary
+                history[server_id].popleft()  # Remove the rolled message
+                history[server_id].append({
+                    "role": "system",
+                    "content": f"Previous conversation summary: {response['message']['content'].strip()}",
+                    "source": "summary",
+                    "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()
+                })
+            except Exception as e:
+                logger.error(f"Error updating conversation summary: {str(e)}")
+                # If summary fails, just remove the oldest message
+                history[server_id].popleft()
+
+    # Add the new message (unless we're in summary-only mode)
+    if history[server_id].maxlen > 0:
+        history[server_id].append({
+            "role": role,
+            "content": content,
+            "source": source,
+            "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()
+        })
 
 async def background_task():
     while True:
         await process_query()
         await asyncio.sleep(2)  # Pause for 2 seconds
-
 
 client.run(
     os.getenv("DISCORD_TOKEN")
